@@ -30,12 +30,12 @@ class SemiAutomatedFeatureEngineering:
         self.task = task
         self.correlation_threshold = correlation_threshold
         self.variance_threshold = variance_threshold
+        self.original_features = set(self.df.columns)
 
     def generate_features(self):
         """
         Generate composite features (add, subtract, multiply, divide)
-        from all pairs of numeric columns. Division is handled row by row
-        to avoid skipping the feature entirely if there's any zero.
+        from all pairs of numeric columns.
         """
         print("[FeatureEngineering] Generating new features...")
         numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
@@ -51,55 +51,59 @@ class SemiAutomatedFeatureEngineering:
             new_features[f"{col1}_minus_{col2}"] = self.df[col1] - self.df[col2]
             # Multiply
             new_features[f"{col1}_times_{col2}"] = self.df[col1] * self.df[col2]
-            # Divide (row by row)
+            # Divide (handling zeros safely)
             div_col_name = f"{col1}_div_{col2}"
-            # If col2 is zero for some rows, we handle that gracefully
             new_features[div_col_name] = np.where(
                 self.df[col2] != 0,
                 self.df[col1] / self.df[col2],
-                0  # or np.nan if you prefer
+                0  
             )
 
         new_features_df = pd.DataFrame(new_features, index=self.df.index)
         self.df = pd.concat([self.df, new_features_df], axis=1)
 
+        # Store the generated feature names
+        self.generated_features = set(new_features_df.columns)
+
+        print(f"[FeatureEngineering] Added {len(self.generated_features)} new features.")
+        print("Sample new features:", list(self.generated_features)[:10])
+
     def evaluate_features(self):
         """
         Drop features that have:
-          1) Correlation with target < correlation_threshold (meaning not correlated enough)
-          2) Variance < variance_threshold (meaning near-zero variance)
+          1) Correlation with target < correlation_threshold
+          2) Variance < variance_threshold
         """
         print("[FeatureEngineering] Filtering features based on correlation & variance...")
 
         # 1) Drop columns with correlation < correlation_threshold
         corr_with_target = self.df.corr()[self.target_column].abs()
-
-        # Find columns with correlation below threshold
         low_corr_features = corr_with_target[corr_with_target < self.correlation_threshold].index.tolist()
-
-        # But we should never drop the target column
         if self.target_column in low_corr_features:
             low_corr_features.remove(self.target_column)
 
-        if len(low_corr_features) > 0:
-            print(f"[FeatureEngineering] Dropping {len(low_corr_features)} low-correlation features: {low_corr_features}")
+        if low_corr_features:
+            print(f"[FeatureEngineering] Dropping {len(low_corr_features)}")
             self.df.drop(columns=low_corr_features, inplace=True)
 
         # 2) Drop columns with near-zero variance
         var_series = self.df.var()
         low_variance_features = var_series[var_series < self.variance_threshold].index.tolist()
-        # Also, don't drop the target
         if self.target_column in low_variance_features:
             low_variance_features.remove(self.target_column)
 
-        if len(low_variance_features) > 0:
-            print(f"[FeatureEngineering] Dropping {len(low_variance_features)} low-variance features: {low_variance_features}")
+        if low_variance_features:
+            print(f"[FeatureEngineering] Dropping {len(low_variance_features)}")
             self.df.drop(columns=low_variance_features, inplace=True)
+
+        # Display summary of remaining features
+        self.remaining_features = set(self.df.columns)
+        retained_features = self.remaining_features - self.original_features
+        print(f"[FeatureEngineering] {len(retained_features)} new features were retained after filtering.")
 
     def compute_feature_importance(self, X, y):
         """
-        Trains a RandomForest (regressor/classifier) and calculates 
-        an average of SHAP-based importance and the built-in feature_importances_.
+        Train a RandomForest and compute SHAP-based feature importance.
         """
         print("[FeatureEngineering] Computing feature importance via SHAP & feature_importances_...")
 
@@ -110,24 +114,19 @@ class SemiAutomatedFeatureEngineering:
 
         model.fit(X, y)
 
-        # SHAP
+        # SHAP importance
         explainer = shap.Explainer(model, X)
         shap_values = explainer(X)
-        # shape is (num_rows, num_features) for regression
-        # or (num_rows, num_classes, num_features) for classification
 
         if self.task == "regression":
-            # Single array
             shap_importance = np.abs(shap_values.values).mean(axis=0)
         else:
-            # Multi-class
-            # We can average across classes
             shap_importance = np.abs(shap_values.values).mean(axis=(0,1))
 
         # Built-in feature_importances_
         permutation_importance = np.array(model.feature_importances_)
 
-        # If shapes differ, ensure they align
+        # Ensure alignment
         min_len = min(len(shap_importance), len(permutation_importance))
         shap_importance = shap_importance[:min_len]
         permutation_importance = permutation_importance[:min_len]
@@ -138,18 +137,14 @@ class SemiAutomatedFeatureEngineering:
 
     def train_and_evaluate(self):
         """
-        Split the data, train a RandomForest, and compute relevant metrics.
-        Returns a dict of metric results.
+        Train a RandomForest model and compute performance metrics.
         """
         print("[FeatureEngineering] Training & evaluating final model with new features...")
 
         X = self.df.drop(columns=[self.target_column])
         y = self.df[self.target_column]
 
-        # Simple split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
         if self.task == "regression":
             model = RandomForestRegressor(random_state=42)
@@ -174,19 +169,17 @@ class SemiAutomatedFeatureEngineering:
 
     def run_pipeline(self):
         """
-        Main pipeline flow:
-          1) generate_features()
-          2) evaluate_features()
-          3) compute_feature_importance()
-          4) train_and_evaluate()
-        Prints out feature importance & final performance.
-        Returns the final performance dict.
+        Main pipeline:
+        1) Generate features
+        2) Evaluate & filter features
+        3) Compute feature importance
+        4) Train & evaluate the model
         """
         print("[FeatureEngineering] Starting pipeline...")
         self.generate_features()
         self.evaluate_features()
 
-        # Compute feature importance with the final set of features
+        # Compute feature importance
         print("[FeatureEngineering] Checking final set of features for importance...")
         X = self.df.drop(columns=[self.target_column])
         y = self.df[self.target_column]
@@ -196,4 +189,10 @@ class SemiAutomatedFeatureEngineering:
 
         results = self.train_and_evaluate()
         print("\n[FeatureEngineering] Model Performance with Engineered Features:", results)
+
+        print(f"\n[FeatureEngineering] Summary:")
+        print(f"- {len(self.generated_features)} new features generated")
+        print(f"- {len(self.remaining_features)} total features after filtering")
+        print(f"- {len(self.generated_features & self.remaining_features)} new features retained")
+
         return results

@@ -1,0 +1,7 @@
+pandas
+numpy
+shap
+matplotlib
+scipy
+scikit-learn
+autofeat
